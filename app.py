@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit_authenticator as stauth
 from pymongo.server_api import ServerApi
 from datetime import datetime
-import os # <-- IMPORT OS
+import os 
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -16,16 +16,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Custom CSS for "Galactic Archives" Theme ---
+# --- Custom CSS ---
 def load_css():
     st.markdown(
         """
         <style>
-        /* Base theme overrides */
-        html, body, [class*="st-"] {
-            background-color: #0F1116; /* Deep space navy */
-            color: #EAEAEA; /* Light grey text */
-        }
+        /* (CSS styles are unchanged) */
+        html, body, [class*="st-"] { background-color: #0F1116; color: #EAEAEA; }
         h1 { color: #00FFFF; text-shadow: 0 0 8px #00FFFF; font-family: 'Orbitron', sans-serif; }
         h2, h3 { color: #00FFFF; }
         .stButton > button { border: 2px solid #00FFFF; background-color: transparent; color: #00FFFF; border-radius: 8px; transition: all 0.3s; }
@@ -44,12 +41,11 @@ def load_css():
 
 load_css()
 
-# --- 1. MongoDB Connection (UPDATED) ---
+# --- 1. MongoDB Connection ---
 
 @st.cache_resource
 def init_connection():
     try:
-        # Use os.environ.get() instead of st.secrets
         uri = os.environ.get("MONGO_URI")
         if not uri:
             st.error("MONGO_URI environment variable not set.")
@@ -104,13 +100,12 @@ credentials = {
     }
 }
 
-# --- Initialize the Authenticator (UPDATED) ---
+# --- Initialize the Authenticator ---
 try:
     authenticator = stauth.Authenticate(
         credentials,
         os.environ.get("USER_COOKIE_NAME"),
         os.environ.get("USER_COOKIE_KEY"),
-        # Get expiry, default to 30 days, and convert to int
         int(os.environ.get("USER_COOKIE_EXPIRY", 30))
     )
 except Exception as e:
@@ -130,7 +125,8 @@ if st.session_state.authentication_status is None:
     login_tab, register_tab = st.tabs(["[ Login ]", "[ Register ]"])
 
     with login_tab:
-        name, authentication_status, username = authenticator.login()
+        # --- THIS IS THE FIX ---
+        name, authentication_status, username = authenticator.login() or (None, None, None)
 
     with register_tab:
         try:
@@ -143,7 +139,6 @@ if st.session_state.authentication_status is None:
             st.error(f"Error during registration: {e}")
 
 # --- 4. Main Application (Logged-in View) ---
-
 if st.session_state.authentication_status:
     name = st.session_state.name
     username = st.session_state.username
