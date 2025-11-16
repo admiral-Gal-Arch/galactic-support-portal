@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit_authenticator as stauth
 from pymongo.server_api import ServerApi
 from datetime import datetime
+import os # <-- IMPORT OS
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -25,74 +26,17 @@ def load_css():
             background-color: #0F1116; /* Deep space navy */
             color: #EAEAEA; /* Light grey text */
         }
-        
-        /* Main title */
-        h1 {
-            color: #00FFFF; /* Bright cyan */
-            text-shadow: 0 0 8px #00FFFF;
-            font-family: 'Orbitron', sans-serif; /* A good sci-fi font */
-        }
-        
-        /* Headers */
-        h2, h3 {
-            color: #00FFFF; /* Bright cyan */
-        }
-
-        /* Buttons */
-        .stButton > button {
-            border: 2px solid #00FFFF;
-            background-color: transparent;
-            color: #00FFFF;
-            border-radius: 8px;
-            transition: all 0.3s;
-        }
-        .stButton > button:hover {
-            background-color: #00FFFF;
-            color: #0F1116;
-            box-shadow: 0 0 10px #00FFFF;
-        }
-        
-        /* Form submit button */
-        .stForm [data-testid="stButton"] button {
-            background-color: #00FFFF;
-            color: #0F1116;
-            border: none;
-            font-weight: bold;
-        }
-        .stForm [data-testid="stButton"] button:hover {
-            background-color: #EAEAEA;
-            color: #0F1116;
-            box-shadow: 0 0 10px #00FFFF;
-        }
-
-        /* Tabs */
-        .stTabs [data-testid="stTab"] {
-            background-color: transparent;
-            border: 1px solid #00B4B4;
-        }
-        .stTabs [data-testid="stTab"][aria-selected="true"] {
-            background-color: #00B4B4;
-            color: white;
-            border-bottom: none;
-        }
-
-        /* Text Input & Text Area */
-        .stTextInput > div > div > input, .stTextArea > div > textarea {
-            background-color: #1C1E25;
-            color: #EAEAEA;
-            border: 1px solid #00B4B4;
-        }
-        
-        /* Expander (for ticket history) */
-        .st-expander {
-            border: 1px solid #00B4B4;
-            border-radius: 8px;
-            background-color: #1C1E25;
-        }
-        .st-expander summary {
-            font-weight: bold;
-            color: #00FFFF;
-        }
+        h1 { color: #00FFFF; text-shadow: 0 0 8px #00FFFF; font-family: 'Orbitron', sans-serif; }
+        h2, h3 { color: #00FFFF; }
+        .stButton > button { border: 2px solid #00FFFF; background-color: transparent; color: #00FFFF; border-radius: 8px; transition: all 0.3s; }
+        .stButton > button:hover { background-color: #00FFFF; color: #0F1116; box-shadow: 0 0 10px #00FFFF; }
+        .stForm [data-testid="stButton"] button { background-color: #00FFFF; color: #0F1116; border: none; font-weight: bold; }
+        .stForm [data-testid="stButton"] button:hover { background-color: #EAEAEA; color: #0F1116; box-shadow: 0 0 10px #00FFFF; }
+        .stTabs [data-testid="stTab"] { background-color: transparent; border: 1px solid #00B4B4; }
+        .stTabs [data-testid="stTab"][aria-selected="true"] { background-color: #00B4B4; color: white; border-bottom: none; }
+        .stTextInput > div > div > input, .stTextArea > div > textarea { background-color: #1C1E25; color: #EAEAEA; border: 1px solid #00B4B4; }
+        .st-expander { border: 1px solid #00B4B4; border-radius: 8px; background-color: #1C1E25; }
+        .st-expander summary { font-weight: bold; color: #00FFFF; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -100,12 +44,17 @@ def load_css():
 
 load_css()
 
-# --- 1. MongoDB Connection (Same as staff app) ---
+# --- 1. MongoDB Connection (UPDATED) ---
 
 @st.cache_resource
 def init_connection():
     try:
-        uri = st.secrets["mongo"]["uri"]
+        # Use os.environ.get() instead of st.secrets
+        uri = os.environ.get("MONGO_URI")
+        if not uri:
+            st.error("MONGO_URI environment variable not set.")
+            return None
+            
         client = pymongo.MongoClient(uri, server_api=ServerApi('1'))
         client.admin.command('ping')
         return client
@@ -156,13 +105,18 @@ credentials = {
 }
 
 # --- Initialize the Authenticator (UPDATED) ---
-# Reads from the new [user_cookie] section
-authenticator = stauth.Authenticate(
-    credentials,
-    st.secrets["user_cookie"]["cookie_name"],
-    st.secrets["user_cookie"]["cookie_key"],
-    st.secrets["user_cookie"]["expiry_days"]
-)
+try:
+    authenticator = stauth.Authenticate(
+        credentials,
+        os.environ.get("USER_COOKIE_NAME"),
+        os.environ.get("USER_COOKIE_KEY"),
+        # Get expiry, default to 30 days, and convert to int
+        int(os.environ.get("USER_COOKIE_EXPIRY", 30))
+    )
+except Exception as e:
+    st.error(f"Error initializing authenticator: {e}. Check cookie environment variables.")
+    st.stop()
+    
 
 # --- 3. Login, Register, & Forgot Password Widgets ---
 
@@ -176,17 +130,15 @@ if st.session_state.authentication_status is None:
     login_tab, register_tab = st.tabs(["[ Login ]", "[ Register ]"])
 
     with login_tab:
-        name, authentication_status, username = authenticator.login('Login', 'main')
+        name, authentication_status, username = authenticator.login()
 
     with register_tab:
         try:
-            # Note: The 'Register' widget automatically hashes the password
-            if authenticator.register_user('Register', 'main'):
-                # Add new user to MongoDB
+            if authenticator.register_user():
                 new_user_data = authenticator.credentials["usernames"][username]
                 public_users_collection.insert_one(new_user_data)
                 st.success('User registered successfully! Please go to the Login tab.')
-                fetch_all_users.clear() # Clear cache
+                fetch_all_users.clear()
         except Exception as e:
             st.error(f"Error during registration: {e}")
 
@@ -223,7 +175,7 @@ if st.session_state.authentication_status:
             else:
                 try:
                     ticket_data = {
-                        "user_email": username, # Link to logged-in user
+                        "user_email": username,
                         "subject": subject,
                         "category": category,
                         "description": description,
@@ -260,13 +212,11 @@ if st.session_state.authentication_status:
                         st.write("**Your Message:**")
                         st.info(ticket.get('description', ''))
                         
-                        # This shows the internal notes for now.
-                        # You could create a separate "staff_response" field.
                         notes = ticket.get("internal_notes", "")
                         if notes.strip():
                              st.divider()
                              st.write("**Archive Staff Notes:**")
-                             st.warning(notes) # Show staff notes
+                             st.warning(notes)
 
         except Exception as e:
             st.error(f"Failed to retrieve ticket archive. Error: {e}")
