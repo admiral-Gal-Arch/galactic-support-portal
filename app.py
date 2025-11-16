@@ -89,17 +89,19 @@ def fetch_all_users():
 
 users = fetch_all_users()
 
-# This is the local credentials dictionary
+# --- THIS IS THE FIX ---
+# Use .get() for safety. This will no longer crash.
 credentials = {
     "usernames": {
-        user["username"]: {
-            "name": user["name"],
-            "email": user["email"],
-            "password": user["password"]
+        user.get("username"): {
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "password": user.get("password")
         }
-        for user in users
+        for user in users if user.get("username") # Also filter out bad/empty docs
     }
 }
+# --- END OF FIX ---
 
 # --- Initialize the Authenticator ---
 try:
@@ -132,14 +134,12 @@ if st.session_state.authentication_status is None:
         try:
             if authenticator.register_user():
                 
-                # --- THIS IS THE FIX ---
-                # 1. Get the username from session_state (set by authenticator)
+                # Get the username from session_state (set by authenticator)
                 username = st.session_state.username
                 
-                # 2. Access the local 'credentials' dict, which was mutated
-                #    This dictionary now contains the new user's hashed password.
+                # Access the local 'credentials' dict, which was mutated
+                # This dictionary now contains the new user's hashed password.
                 new_user_data = credentials["usernames"][username]
-                # --- END OF FIX ---
                 
                 public_users_collection.insert_one(new_user_data)
                 st.success('User registered successfully! Please go to the Login tab.')
