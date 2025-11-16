@@ -89,6 +89,7 @@ def fetch_all_users():
 
 users = fetch_all_users()
 
+# This is the local credentials dictionary
 credentials = {
     "usernames": {
         user["username"]: {
@@ -103,7 +104,7 @@ credentials = {
 # --- Initialize the Authenticator ---
 try:
     authenticator = stauth.Authenticate(
-        credentials,
+        credentials, # We pass the local dictionary here
         os.environ.get("USER_COOKIE_NAME"),
         os.environ.get("USER_COOKIE_KEY"),
         int(os.environ.get("USER_COOKIE_EXPIRY", 30))
@@ -125,13 +126,19 @@ if st.session_state.authentication_status is None:
     login_tab, register_tab = st.tabs(["[ Login ]", "[ Register ]"])
 
     with login_tab:
-        # --- THIS IS THE FIX ---
         name, authentication_status, username = authenticator.login() or (None, None, None)
 
     with register_tab:
         try:
             if authenticator.register_user():
-                new_user_data = authenticator.credentials["usernames"][username]
+                
+                # --- THIS IS THE FIX ---
+                # 1. Get the username from session_state (set by authenticator)
+                username = st.session_state.username
+                # 2. Access the local 'credentials' dict, which was mutated
+                new_user_data = credentials["usernames"][username]
+                # --- END OF FIX ---
+                
                 public_users_collection.insert_one(new_user_data)
                 st.success('User registered successfully! Please go to the Login tab.')
                 fetch_all_users.clear()
