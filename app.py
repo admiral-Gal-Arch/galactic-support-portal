@@ -1,0 +1,278 @@
+# support_portal.py
+
+import streamlit as st
+import pymongo
+import pandas as pd
+import streamlit_authenticator as stauth
+from pymongo.server_api import ServerApi
+from datetime import datetime
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Support Terminal",
+    page_icon="📡",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# --- Custom CSS for "Galactic Archives" Theme ---
+def load_css():
+    st.markdown(
+        """
+        <style>
+        /* Base theme overrides */
+        html, body, [class*="st-"] {
+            background-color: #0F1116; /* Deep space navy */
+            color: #EAEAEA; /* Light grey text */
+        }
+        
+        /* Main title */
+        h1 {
+            color: #00FFFF; /* Bright cyan */
+            text-shadow: 0 0 8px #00FFFF;
+            font-family: 'Orbitron', sans-serif; /* A good sci-fi font */
+        }
+        
+        /* Headers */
+        h2, h3 {
+            color: #00FFFF; /* Bright cyan */
+        }
+
+        /* Buttons */
+        .stButton > button {
+            border: 2px solid #00FFFF;
+            background-color: transparent;
+            color: #00FFFF;
+            border-radius: 8px;
+            transition: all 0.3s;
+        }
+        .stButton > button:hover {
+            background-color: #00FFFF;
+            color: #0F1116;
+            box-shadow: 0 0 10px #00FFFF;
+        }
+        
+        /* Form submit button */
+        .stForm [data-testid="stButton"] button {
+            background-color: #00FFFF;
+            color: #0F1116;
+            border: none;
+            font-weight: bold;
+        }
+        .stForm [data-testid="stButton"] button:hover {
+            background-color: #EAEAEA;
+            color: #0F1116;
+            box-shadow: 0 0 10px #00FFFF;
+        }
+
+        /* Tabs */
+        .stTabs [data-testid="stTab"] {
+            background-color: transparent;
+            border: 1px solid #00B4B4;
+        }
+        .stTabs [data-testid="stTab"][aria-selected="true"] {
+            background-color: #00B4B4;
+            color: white;
+            border-bottom: none;
+        }
+
+        /* Text Input & Text Area */
+        .stTextInput > div > div > input, .stTextArea > div > textarea {
+            background-color: #1C1E25;
+            color: #EAEAEA;
+            border: 1px solid #00B4B4;
+        }
+        
+        /* Expander (for ticket history) */
+        .st-expander {
+            border: 1px solid #00B4B4;
+            border-radius: 8px;
+            background-color: #1C1E25;
+        }
+        .st-expander summary {
+            font-weight: bold;
+            color: #00FFFF;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+load_css()
+
+# --- 1. MongoDB Connection (Same as staff app) ---
+
+@st.cache_resource
+def init_connection():
+    try:
+        uri = st.secrets["mongo"]["uri"]
+        client = pymongo.MongoClient(uri, server_api=ServerApi('1'))
+        client.admin.command('ping')
+        return client
+    except Exception as e:
+        st.error(f"Failed to connect to Archive. Please try again later. {e}")
+        return None
+
+client = init_connection()
+
+if client is None:
+    st.stop()
+
+@st.cache_resource
+def get_database(db_name):
+    return client[db_name]
+
+@st.cache_resource
+def get_collection(db_name, collection_name):
+    db = get_database(db_name)
+    return db[collection_name]
+
+# --- Get collections ---
+public_users_collection = get_collection("support_center", "public_users")
+tickets_collection = get_collection("support_center", "tickets")
+
+
+# --- 2. User Authentication ---
+
+@st.cache_data(ttl=600)
+def fetch_all_users():
+    try:
+        return list(public_users_collection.find({}, {"_id": 0}))
+    except Exception as e:
+        st.error(f"Error connecting to user database: {e}")
+        return []
+
+users = fetch_all_users()
+
+credentials = {
+    "usernames": {
+        user["username"]: {
+            "name": user["name"],
+            "email": user["email"],
+            "password": user["password"]
+        }
+        for user in users
+    }
+}
+
+# --- Initialize the Authenticator (UPDATED) ---
+# Reads from the new [user_cookie] section
+authenticator = stauth.Authenticate(
+    credentials,
+    st.secrets["user_cookie"]["cookie_name"],
+    st.secrets["user_cookie"]["cookie_key"],
+    st.secrets["user_cookie"]["expiry_days"]
+)
+
+# --- 3. Login, Register, & Forgot Password Widgets ---
+
+if "authentication_status" not in st.session_state:
+    st.session_state.authentication_status = None
+
+if st.session_state.authentication_status is None:
+    st.title("Galactic Archives Support")
+    st.header("Access Terminal")
+    
+    login_tab, register_tab = st.tabs(["[ Login ]", "[ Register ]"])
+
+    with login_tab:
+        name, authentication_status, username = authenticator.login('Login', 'main')
+
+    with register_tab:
+        try:
+            # Note: The 'Register' widget automatically hashes the password
+            if authenticator.register_user('Register', 'main'):
+                # Add new user to MongoDB
+                new_user_data = authenticator.credentials["usernames"][username]
+                public_users_collection.insert_one(new_user_data)
+                st.success('User registered successfully! Please go to the Login tab.')
+                fetch_all_users.clear() # Clear cache
+        except Exception as e:
+            st.error(f"Error during registration: {e}")
+
+# --- 4. Main Application (Logged-in View) ---
+
+if st.session_state.authentication_status:
+    name = st.session_state.name
+    username = st.session_state.username
+
+    st.sidebar.title(f"Welcome, *{name}*")
+    authenticator.logout('Logout', 'sidebar')
+
+    st.header("Support & Diagnostics Terminal")
+
+    tab1, tab2 = st.tabs(["[ Submit New Transmission ]", "[ My Transmission Archive ]"])
+
+    # --- TAB 1: Submit New Ticket ---
+    with tab1:
+        st.subheader("📡 Open a New Support Channel")
+        
+        with st.form("new_ticket_form", clear_on_submit=True):
+            subject = st.text_input("Subject", placeholder="e.g., Hyperdrive Malfunction")
+            category = st.selectbox(
+                "System Category",
+                ["Archive Access", "Starship Systems", "Account/Billing", "Data Anomaly", "Other"]
+            )
+            description = st.text_area("Full Description", height=150, placeholder="Please provide all relevant details...")
+            
+            submitted = st.form_submit_button("Transmit Request")
+
+        if submitted:
+            if not subject or not description:
+                st.warning("Please fill out the Subject and Description fields.")
+            else:
+                try:
+                    ticket_data = {
+                        "user_email": username, # Link to logged-in user
+                        "subject": subject,
+                        "category": category,
+                        "description": description,
+                        "status": "New",
+                        "created_at": datetime.now(),
+                        "assigned_to": None,
+                        "internal_notes": ""
+                    }
+                    tickets_collection.insert_one(ticket_data)
+                    st.success("Support request transmitted successfully! We will contact you at your registered email.")
+                except Exception as e:
+                    st.error(f"Transmission failed. Please try again. Error: {e}")
+
+    # --- TAB 2: View My Tickets ---
+    with tab2:
+        st.subheader("📝 My Support History")
+        
+        try:
+            user_tickets = list(tickets_collection.find(
+                {"user_email": username},
+                sort=[("created_at", pymongo.DESCENDING)]
+            ))
+            
+            if not user_tickets:
+                st.info("You have no support transmissions in the archive.")
+            else:
+                for ticket in user_tickets:
+                    ticket_id = str(ticket["_id"])
+                    
+                    with st.expander(f"**{ticket.get('subject', 'No Subject')}** (Status: {ticket.get('status', 'N/A')})"):
+                        st.markdown(f"**Submitted:** {ticket.get('created_at', 'N/A').strftime('%Y-%m-%d %H:%M')}")
+                        st.markdown(f"**Category:** {ticket.get('category', 'N/A')}")
+                        st.divider()
+                        st.write("**Your Message:**")
+                        st.info(ticket.get('description', ''))
+                        
+                        # This shows the internal notes for now.
+                        # You could create a separate "staff_response" field.
+                        notes = ticket.get("internal_notes", "")
+                        if notes.strip():
+                             st.divider()
+                             st.write("**Archive Staff Notes:**")
+                             st.warning(notes) # Show staff notes
+
+        except Exception as e:
+            st.error(f"Failed to retrieve ticket archive. Error: {e}")
+
+# --- 5. Login-Failed Logic ---
+elif st.session_state.authentication_status == False:
+    st.error('Username/password is incorrect')
+elif st.session_state.authentication_status == None:
+    pass
