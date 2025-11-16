@@ -89,6 +89,7 @@ def fetch_all_users():
 
 users = fetch_all_users()
 
+# This is the local credentials dictionary
 credentials = {
     "usernames": {
         user["username"]: {
@@ -103,7 +104,7 @@ credentials = {
 # --- Initialize the Authenticator ---
 try:
     authenticator = stauth.Authenticate(
-        credentials,
+        credentials, # We pass the local dictionary here
         os.environ.get("USER_COOKIE_NAME"),
         os.environ.get("USER_COOKIE_KEY"),
         int(os.environ.get("USER_COOKIE_EXPIRY", 30))
@@ -129,28 +130,22 @@ if st.session_state.authentication_status is None:
 
     with register_tab:
         try:
-            # This 'register_user' widget populates st.session_state
             if authenticator.register_user():
                 
                 # --- THIS IS THE FIX ---
-                # Build the new user object from session_state
-                # instead of reading from the 'credentials' dict.
-                new_user_data = {
-                    "username": st.session_state.username,
-                    "name": st.session_state.name,
-                    "email": st.session_state.username, # email is the username
-                    "password": st.session_state.password # This is the *hashed* password
-                }
+                # 1. Get the username from session_state (set by authenticator)
+                username = st.session_state.username
+                
+                # 2. Access the local 'credentials' dict, which was mutated
+                #    This dictionary now contains the new user's hashed password.
+                new_user_data = credentials["usernames"][username]
                 # --- END OF FIX ---
                 
                 public_users_collection.insert_one(new_user_data)
                 st.success('User registered successfully! Please go to the Login tab.')
                 fetch_all_users.clear()
         except Exception as e:
-            if e is None:
-                st.error("An unknown error occurred during registration. Please try again.")
-            else:
-                st.error(f"Error during registration: {e}")
+            st.error(f"Error during registration: {e}")
 
 # --- 4. Main Application (Logged-in View) ---
 if st.session_state.authentication_status:
