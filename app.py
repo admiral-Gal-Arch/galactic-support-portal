@@ -1,50 +1,25 @@
-# support_portal.py
+# app.py
 
 import streamlit as st
 import pymongo
 import pandas as pd
 import streamlit_authenticator as stauth
 from pymongo.server_api import ServerApi
-from datetime import datetime
-import os 
+from bson import ObjectId
+import os
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Support Terminal",
-    page_icon="📡",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    page_title="Galactic Support Center",
+    page_icon="🛰️",
+    layout="wide"
 )
-
-# --- Custom CSS ---
-def load_css():
-    st.markdown(
-        """
-        <style>
-        /* (CSS styles are unchanged) */
-        html, body, [class*="st-"] { background-color: #0F1116; color: #EAEAEA; }
-        h1 { color: #00FFFF; text-shadow: 0 0 8px #00FFFF; font-family: 'Orbitron', sans-serif; }
-        h2, h3 { color: #00FFFF; }
-        .stButton > button { border: 2px solid #00FFFF; background-color: transparent; color: #00FFFF; border-radius: 8px; transition: all 0.3s; }
-        .stButton > button:hover { background-color: #00FFFF; color: #0F1116; box-shadow: 0 0 10px #00FFFF; }
-        .stForm [data-testid="stButton"] button { background-color: #00FFFF; color: #0F1116; border: none; font-weight: bold; }
-        .stForm [data-testid="stButton"] button:hover { background-color: #EAEAEA; color: #0F1116; box-shadow: 0 0 10px #00FFFF; }
-        .stTabs [data-testid="stTab"] { background-color: transparent; border: 1px solid #00B4B4; }
-        .stTabs [data-testid="stTab"][aria-selected="true"] { background-color: #00B4B4; color: white; border-bottom: none; }
-        .stTextInput > div > div > input, .stTextArea > div > textarea { background-color: #1C1E25; color: #EAEAEA; border: 1px solid #00B4B4; }
-        .st-expander { border: 1px solid #00B4B4; border-radius: 8px; background-color: #1C1E25; }
-        .st-expander summary { font-weight: bold; color: #00FFFF; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-load_css()
 
 # --- 1. MongoDB Connection ---
 
 @st.cache_resource
 def init_connection():
+    """Initialize a connection to MongoDB Atlas."""
     try:
         uri = os.environ.get("MONGO_URI")
         if not uri:
@@ -55,7 +30,7 @@ def init_connection():
         client.admin.command('ping')
         return client
     except Exception as e:
-        st.error(f"Failed to connect to Archive. Please try again later. {e}")
+        st.error(f"Failed to connect to MongoDB: {e}")
         return None
 
 client = init_connection()
@@ -72,8 +47,8 @@ def get_collection(db_name, collection_name):
     db = get_database(db_name)
     return db[collection_name]
 
-# --- Get collections ---
-public_users_collection = get_collection("support_center", "public_users")
+# --- Get your collections ---
+staff_collection = get_collection("support_center", "staff_users")
 tickets_collection = get_collection("support_center", "tickets")
 
 
@@ -81,13 +56,18 @@ tickets_collection = get_collection("support_center", "tickets")
 
 @st.cache_data(ttl=600)
 def fetch_all_users():
+    """Fetch all staff users from the database."""
     try:
-        return list(public_users_collection.find({}, {"_id": 0}))
+        return list(staff_collection.find({}, {"_id": 0}))
     except Exception as e:
-        st.error(f"Error connecting to user database: {e}")
+        st.error(f"Error fetching user data: {e}")
         return []
 
 users = fetch_all_users()
+
+if not users:
+    st.error("No staff users found in the database. Please add a user.")
+    st.stop()
 
 # --- THIS IS THE FIX ---
 # Use .get() for safety. This will no longer crash.
@@ -98,7 +78,7 @@ credentials = {
             "email": user.get("email"),
             "password": user.get("password")
         }
-        for user in users if user.get("username") # Also filter out bad/empty docs
+        for user in users if user.get("username")
     }
 }
 # --- END OF FIX ---
@@ -106,127 +86,260 @@ credentials = {
 # --- Initialize the Authenticator ---
 try:
     authenticator = stauth.Authenticate(
-        credentials, # We pass the local dictionary here
-        os.environ.get("USER_COOKIE_NAME"),
-        os.environ.get("USER_COOKIE_KEY"),
-        int(os.environ.get("USER_COOKIE_EXPIRY", 30))
+        credentials,
+        os.environ.get("STAFF_COOKIE_NAME"),
+        os.environ.get("STAFF_COOKIE_KEY"),
+        int(os.environ.get("STAFF_COOKIE_EXPIRY", 7)) 
     )
 except Exception as e:
     st.error(f"Error initializing authenticator: {e}. Check cookie environment variables.")
     st.stop()
-    
 
-# --- 3. Login, Register, & Forgot Password Widgets ---
 
+# --- 3. View Management (Session State) ---
+if "view" not in st.session_state:
+    st.session_state.view = "dashboard"
+if "selected_ticket_id" not in st.session_state:
+    st.session_state.selected_ticket_id = None
 if "authentication_status" not in st.session_state:
     st.session_state.authentication_status = None
+if "name" not in st.session_state:
+    st.session_state.name = None
 
-if st.session_state.authentication_status is None:
-    st.title("Galactic Archives Support")
-    st.header("Access Terminal")
-    
-    login_tab, register_tab = st.tabs(["[ Login ]", "[ Register ]"])
+# --- 4. Page View Functions (MOVED HERE) ---
 
-    with login_tab:
-        name, authentication_status, username = authenticator.login() or (None, None, None)
+def show_dashboard(staff_list):
+    st.title("🛰️ Support Center Dashboard")
+    st.write("Select a ticket from the queue to view and edit details.")
 
-    with register_tab:
+    PAGE_SIZE = 50 # --- NEW: Set how many tickets per page ---
+
+    # --- NEW: Callback to reset page when filters change ---
+    def reset_page():
+        st.session_state.page = 0
+
+    # --- UPDATED: Get_all_tickets now performs filtering and pagination ---
+    @st.cache_data(ttl=60)
+    def get_all_tickets(page_number, page_size, status_filter, assignee_filter):
         try:
-            if authenticator.register_user():
-                
-                # Get the username from session_state (set by authenticator)
-                username = st.session_state.username
-                
-                # Access the local 'credentials' dict, which was mutated
-                # This dictionary now contains the new user's hashed password.
-                new_user_data = credentials["usernames"][username]
-                
-                public_users_collection.insert_one(new_user_data)
-                st.success('User registered successfully! Please go to the Login tab.')
-                fetch_all_users.clear()
+            # Build the query
+            query = {}
+            if status_filter != "All":
+                query["status"] = status_filter
+            if assignee_filter == "Unassigned":
+                query["assigned_to"] = {"$in": [None, ""]}
+            elif assignee_filter != "All":
+                query["assigned_to"] = assignee_filter
+
+            # Get total count for pagination
+            total_tickets = tickets_collection.count_documents(query)
+
+            # Calculate skip
+            skip_amount = page_number * page_size
+            
+            # Fetch the paginated and filtered data
+            tickets = list(
+                tickets_collection.find(query, {})
+                .sort("created_at", pymongo.DESCENDING)
+                .skip(skip_amount)
+                .limit(page_size)
+            )
+            
+            if not tickets:
+                return pd.DataFrame(columns=["_id", "status", "subject", "user_email", "created_at", "assigned_to"]), 0
+            
+            df = pd.DataFrame(tickets)
+            df["_id"] = df["_id"].astype(str)
+            return df, total_tickets
+        
         except Exception as e:
-            st.error(f"Error during registration: {e}")
+            st.error(f"Error fetching tickets: {e}")
+            return pd.DataFrame(), 0
 
-# --- 4. Main Application (Logged-in View) ---
+    # --- Sidebar Filters ---
+    st.sidebar.header("Filter Tickets")
+    
+    # Get unique values for filters
+    status_options = ["All", "New", "In Progress", "Awaiting User", "Closed"]
+    assignee_list = ["Unassigned"] + staff_list
+    assignee_options = ["All"] + list(pd.Series(assignee_list).unique())
+
+    # --- UPDATED: Add on_change callback ---
+    selected_status = st.sidebar.selectbox("Filter by Status:", status_options, on_change=reset_page)
+    selected_assignee = st.sidebar.selectbox("Filter by Assignee:", assignee_options, on_change=reset_page)
+
+    # --- Call the updated function ---
+    df_tickets, total_tickets = get_all_tickets(
+        st.session_state.page, PAGE_SIZE, selected_status, selected_assignee
+    )
+    
+    total_pages = (total_tickets + PAGE_SIZE - 1) // PAGE_SIZE
+
+    if df_tickets.empty:
+        st.success("No tickets found for these filters. 🚀")
+        return
+    
+    # --- Display the dataframe ---
+    st.dataframe(
+        df_tickets,
+        key="ticket_queue",
+        on_select="rerun",
+        selection_mode="single-row",
+        use_container_width=True,
+        column_order=("_id", "status", "subject", "user_email", "created_at", "assigned_to"),
+        column_config={
+            "_id": "Ticket ID",
+            "status": "Status",
+            "subject": "Ticket Subject",
+            "user_email": "User Email",
+            "created_at": "Date Created",
+            "assigned_to": "Assigned To"
+        },
+        hide_index=True
+    )
+    
+    # --- Handle Row Selection ---
+    if st.session_state.ticket_queue.selection.rows:
+        selected_row_index = st.session_state.ticket_queue.selection.rows[0]
+        selected_id = df_tickets.iloc[selected_row_index]["_id"]
+        
+        st.session_state.selected_ticket_id = selected_id
+        st.session_state.view = "detail"
+        st.rerun()
+
+    st.divider()
+
+    # --- NEW: Pagination controls ---
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    if st.session_state.page > 0:
+        if col1.button("⬅️ Previous Page"):
+            st.session_state.page -= 1
+            st.rerun()
+    
+    col2.markdown(f"**Page {st.session_state.page + 1} of {total_pages}**")
+
+    if st.session_state.page < total_pages - 1:
+        if col3.button("Next Page ➡️"):
+            st.session_state.page += 1
+            st.rerun()
+
+
+def show_ticket_detail(ticket_id, staff_list):
+    
+    if st.button("← Back to Dashboard"):
+        st.session_state.view = "dashboard"
+        st.session_state.selected_ticket_id = None
+        st.rerun()
+
+    st.title("Manage Ticket Details")
+    st.markdown(f"**Ticket ID:** `{ticket_id}`")
+
+    try:
+        current_ticket = tickets_collection.find_one({"_id": ObjectId(ticket_id)})
+    except Exception as e:
+        st.error(f"Could not find ticket. Error: {e}")
+        return
+
+    if not current_ticket:
+        st.error("Ticket not found.")
+        return
+
+    # --- Display Ticket Info ---
+    st.subheader("Ticket Information")
+    col1, col2 = st.columns(2)
+    col1.metric("Status", current_ticket.get("status", "N/A"))
+    col2.metric("Submitted By", current_ticket.get("user_email", "N/A"))
+    
+    st.text_input("Subject", current_ticket.get("subject", ""), disabled=True)
+    st.text_area("Full Description", current_ticket.get("description", ""), height=150, disabled=True)
+    
+    st.divider()
+    
+    # --- Ticket History ---
+    st.subheader("Ticket History")
+    current_notes = current_ticket.get("internal_notes", "")
+    if current_notes.strip():
+        st.text_area("Log", current_notes, height=200, disabled=True, key="ticket_history_log")
+    else:
+        st.info("No history or internal notes for this ticket yet.")
+
+    st.divider()
+    
+    st.subheader("Support Actions")
+    
+    current_status = current_ticket.get("status", "New")
+    current_assignee = current_ticket.get("assigned_to")
+    # current_notes is already defined above
+
+    status_options = ["New", "In Progress", "Awaiting User", "Closed"]
+    if current_status not in status_options:
+        status_options.append(current_status)
+        
+    assignee_options = ["Unassigned"] + staff_list
+    
+    try:
+        status_index = status_options.index(current_status)
+    except ValueError: status_index = 0
+        
+    try:
+        assignee_index = assignee_options.index(current_assignee if current_assignee else "Unassigned")
+    except ValueError: assignee_index = 0
+
+    with st.form("update_ticket_form"):
+        new_status = st.selectbox("Update Status", options=status_options, index=status_index)
+        new_assignee = st.selectbox("Assign To", options=assignee_options, index=assignee_index)
+        new_notes = st.text_area("Add Internal Notes (new notes will be prepended)", value="", placeholder="Type your update here...")
+        submitted = st.form_submit_button("Save Changes")
+
+    if submitted:
+        final_assignee = None if new_assignee == "Unassigned" else new_assignee
+        
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        note_entry = f"--- Update by {st.session_state.name} ({now}) ---\n{new_notes}\n\n"
+        
+        final_notes = note_entry + current_notes if new_notes.strip() else current_notes
+
+        try:
+            tickets_collection.update_one(
+                {"_id": ObjectId(ticket_id)},
+                {
+                    "$set": {
+                        "status": new_status,
+                        "assigned_to": final_assignee,
+                        "internal_notes": final_notes
+                    }
+                }
+            )
+            st.success("Ticket updated successfully!")
+            # --- UPDATED: Clear this specific function's cache ---
+            get_all_tickets.clear() 
+            st.session_state.view = "dashboard"
+            st.session_state.selected_ticket_id = None
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Failed to update ticket: {e}")
+
+
+# --- 5. Main Application Logic ---
+
+name, authentication_status, username = authenticator.login() or (None, None, None)
+
 if st.session_state.authentication_status:
-    name = st.session_state.name
-    username = st.session_state.username
-
-    st.sidebar.title(f"Welcome, *{name}*")
+    st.sidebar.title(f"Welcome, *{st.session_state.name}*")
     authenticator.logout('Logout', 'sidebar')
 
-    st.header("Support & Diagnostics Terminal")
+    staff_name_list = [user.get("name", "Unknown Staff") for user in users]
 
-    tab1, tab2 = st.tabs(["[ Submit New Transmission ]", "[ My Transmission Archive ]"])
+    if st.session_state.view == "dashboard":
+        show_dashboard(staff_name_list) 
+    elif st.session_state.view == "detail":
+        show_ticket_detail(st.session_state.selected_ticket_id, staff_name_list)
 
-    # --- TAB 1: Submit New Ticket ---
-    with tab1:
-        st.subheader("📡 Open a New Support Channel")
-        
-        with st.form("new_ticket_form", clear_on_submit=True):
-            subject = st.text_input("Subject", placeholder="e.g., Hyperdrive Malfunction")
-            category = st.selectbox(
-                "System Category",
-                ["Archive Access", "Starship Systems", "Account/Billing", "Data Anomaly", "Other"]
-            )
-            description = st.text_area("Full Description", height=150, placeholder="Please provide all relevant details...")
-            
-            submitted = st.form_submit_button("Transmit Request")
-
-        if submitted:
-            if not subject or not description:
-                st.warning("Please fill out the Subject and Description fields.")
-            else:
-                try:
-                    ticket_data = {
-                        "user_email": username,
-                        "subject": subject,
-                        "category": category,
-                        "description": description,
-                        "status": "New",
-                        "created_at": datetime.now(),
-                        "assigned_to": None,
-                        "internal_notes": ""
-                    }
-                    tickets_collection.insert_one(ticket_data)
-                    st.success("Support request transmitted successfully! We will contact you at your registered email.")
-                except Exception as e:
-                    st.error(f"Transmission failed. Please try again. Error: {e}")
-
-    # --- TAB 2: View My Tickets ---
-    with tab2:
-        st.subheader("📝 My Support History")
-        
-        try:
-            user_tickets = list(tickets_collection.find(
-                {"user_email": username},
-                sort=[("created_at", pymongo.DESCENDING)]
-            ))
-            
-            if not user_tickets:
-                st.info("You have no support transmissions in the archive.")
-            else:
-                for ticket in user_tickets:
-                    ticket_id = str(ticket["_id"])
-                    
-                    with st.expander(f"**{ticket.get('subject', 'No Subject')}** (Status: {ticket.get('status', 'N/A')})"):
-                        st.markdown(f"**Submitted:** {ticket.get('created_at', 'N/A').strftime('%Y-%m-%d %H:%M')}")
-                        st.markdown(f"**Category:** {ticket.get('category', 'N/A')}")
-                        st.divider()
-                        st.write("**Your Message:**")
-                        st.info(ticket.get('description', ''))
-                        
-                        notes = ticket.get("internal_notes", "")
-                        if notes.strip():
-                             st.divider()
-                             st.write("**Archive Staff Notes:**")
-                             st.warning(notes)
-
-        except Exception as e:
-            st.error(f"Failed to retrieve ticket archive. Error: {e}")
-
-# --- 5. Login-Failed Logic ---
 elif st.session_state.authentication_status == False:
     st.error('Username/password is incorrect')
+
 elif st.session_state.authentication_status == None:
     pass
